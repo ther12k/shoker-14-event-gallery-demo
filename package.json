@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "start": "tsx backend/server.ts",
     "test": "node --import tsx --test src/lib/faceSearch.test.ts",
-    "faces:scan": "tsx scripts/write-scan-queue.ts && python3 scripts/scan_faces.py"
+    "faces:scan": "tsx scripts/write-scan-queue.ts && python3 scripts/scan_faces.py",
+    "build:pages": "VITE_FACE_ENGINE=browser VITE_BASE=/shoker-14-event-gallery-demo/ vite build",
+    "faces:export": "tsx scripts/export-static-faces.ts"
   },
   "dependencies": {
     "clsx": "2.1.1",

@@ -2,7 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PHOTOS, SESSIONS } from "@/data/event";
 import { Reveal, useToast } from "@/lib/store";
 import { ambience } from "@/lib/audio";
-import type { FaceBoundingBox } from "@/lib/faceSearchUtils";
+import { euclideanDistance, type FaceBoundingBox } from "@/lib/faceSearchUtils";
+import { browserDetectFaces, browserEmbedFace } from "@/lib/faceEngine";
+
+/** Static GitHub Pages build runs the pipeline fully in the browser */
+const BROWSER = import.meta.env.VITE_FACE_ENGINE === "browser";
+const BASE = import.meta.env.BASE_URL;
+const cropSrc = (url: string) => (url.startsWith("/") ? url : BASE + url);
 import {
   IconClose,
   IconInfo,
@@ -15,6 +21,7 @@ import {
 /* ── API types (mirrors backend payload; descriptors never leave the server) ── */
 
 interface FaceRecord {
+  descriptor?: number[];
   faceId: string;
   fileId: string;
   photoTitle: string;
@@ -115,8 +122,28 @@ export function FaceSearch() {
 
   const loadFaces = useCallback(async () => {
     try {
-      const res = await fetch("/api/faces");
-      if (res.ok) setPayload(await res.json());
+      if (BROWSER) {
+        const res = await fetch(BASE + "demo/faces.json");
+        if (!res.ok) return;
+        const raw = await res.json();
+        const byId = new Map<string, FaceRecord>(raw.faces.map((f: FaceRecord) => [f.faceId, f]));
+        setPayload({
+          groups: raw.groups.map((g: any) => ({
+            groupId: g.groupId,
+            faces: g.faces.map((id: string) => byId.get(id)).filter(Boolean),
+            representative: byId.get(g.representative),
+            photoIds: g.photoIds,
+            photoCount: g.photoCount,
+          })),
+          faces: raw.faces,
+          indexedPhotosCount: raw.indexedPhotosCount,
+          totalFaces: raw.totalFaces,
+          generatedAt: raw.generatedAt,
+        });
+      } else {
+        const res = await fetch("/api/faces");
+        if (res.ok) setPayload(await res.json());
+      }
     } catch {
       /* backend offline — panel shows its idle hint */
     }
@@ -125,6 +152,7 @@ export function FaceSearch() {
   useEffect(() => {
     loadFaces();
   }, [loadFaces]);
+
 
   useEffect(() => {
     try {
@@ -249,11 +277,11 @@ export function FaceSearch() {
 
         {/* upload search */}
         <Reveal delay={80} className="mt-8">
-          <UploadSearch ready={ready} />
+          <UploadSearch ready={ready} faces={payload?.faces ?? []} />
         </Reveal>
 
         {/* scan progress / idle control */}
-        {!ready && (
+        {!ready && !BROWSER && (
           <Reveal delay={100} className="mt-6">
             <div className="flex flex-col items-center gap-4 rounded-3xl border border-dashed border-parchment/25 bg-parchment/5 px-6 py-12 text-center">
               <IconSparkle width={34} height={34} className="text-gold" />
@@ -328,7 +356,7 @@ export function FaceSearch() {
                     }`}
                   >
                     <img
-                      src={g.representative.cropUrl}
+                      src={cropSrc(g.representative.cropUrl)}
                       alt={`Wajah grup ${g.groupId}`}
                       loading="lazy"
                       className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-110"
@@ -341,7 +369,7 @@ export function FaceSearch() {
                       {g.faces.slice(0, 3).map((f) => (
                         <img
                           key={f.faceId}
-                          src={f.cropUrl}
+                          src={cropSrc(f.cropUrl)}
                           alt=""
                           loading="lazy"
                           className="h-6 w-6 rounded-full border border-parchment/60 object-cover"
@@ -403,7 +431,11 @@ export function FaceSearch() {
 
 /* ── Upload & search card ────────────────────────────────────────────────── */
 
-function UploadSearch({ ready }: { ready: boolean }) {
+function UploadSearch({ ready, faces }: { ready: boolean; faces: FaceRecord[] }) {
+  const facesRef = useRef<FaceRecord[]>(faces);
+  useEffect(() => {
+    facesRef.current = faces;
+  }, [faces]);
   const { push } = useToast();
   const [image, setImage] = useState<string | null>(null);
   const [detected, setDetected] = useState<DetectedFace[]>([]);
@@ -432,15 +464,20 @@ function UploadSearch({ ready }: { ready: boolean }) {
       setIsDetecting(true);
       setMatches(null);
       try {
-        const res = await fetch("/api/faces/detect", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ image: img }),
-        });
-        const body = await res.json();
-        if (!res.ok) throw new Error(body?.error || "Deteksi wajah gagal.");
-        setDetected(body.faces ?? []);
-        setSelected(body.faces?.length ? 0 : null);
+        const faces: DetectedFace[] = BROWSER
+          ? await browserDetectFaces(img)
+          : await (async () => {
+              const res = await fetch("/api/faces/detect", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ image: img }),
+              });
+              const body = await res.json();
+              if (!res.ok) throw new Error(body?.error || "Deteksi wajah gagal.");
+              return (body.faces ?? []) as DetectedFace[];
+            })();
+        setDetected(faces);
+        setSelected(faces.length ? 0 : null);
       } catch (err: any) {
         push({ title: "Deteksi gagal", desc: err?.message, tone: "bad" });
         setDetected([]);
@@ -484,16 +521,48 @@ function UploadSearch({ ready }: { ready: boolean }) {
     ambience.blip(820, 0.12);
     try {
       const box = drawnBox ?? (selected !== null ? detected[selected]?.box : undefined);
-      const res = await fetch("/api/faces/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, box }),
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body?.error || "Pencarian wajah gagal.");
-      setMatches(body.matches ?? []);
-      setQueryPreview(body.preview ?? null);
-      if (!body.matches?.length) {
+      let matches: Match[] | undefined;
+      let preview: string | null = null;
+      if (BROWSER) {
+        const { descriptor, preview: pv } = await browserEmbedFace(image, box ?? undefined);
+        preview = pv;
+        const bestByPhoto = new Map<string, Match>();
+        for (const face of facesRef.current) {
+          if (!face.descriptor) continue;
+          const distance = euclideanDistance(descriptor, face.descriptor);
+          if (distance > 1.0) continue;
+          const similarity = Math.round(Math.max(0, (1 - distance / 1.414)) * 100);
+          const existing = bestByPhoto.get(face.fileId);
+          if (!existing || similarity > existing.similarity) {
+            bestByPhoto.set(face.fileId, {
+              fileId: face.fileId,
+              similarity,
+              faceId: face.faceId,
+              cropUrl: cropSrc(face.cropUrl),
+              photoTitle: face.photoTitle,
+              category: face.category,
+              time: face.time,
+              groupId: face.groupId,
+            });
+          }
+        }
+        matches = Array.from(bestByPhoto.values())
+          .sort((a, b) => b.similarity - a.similarity)
+          .slice(0, 40);
+      } else {
+        const res = await fetch("/api/faces/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image, box }),
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body?.error || "Pencarian wajah gagal.");
+        matches = body.matches;
+        preview = body.preview ?? null;
+      }
+      setMatches(matches ?? []);
+      setQueryPreview(preview);
+      if (!matches?.length) {
         push({
           title: "Tidak ada kecocokan",
           desc: "Coba foto lain yang lebih jelas, wajah menghadap kamera.",

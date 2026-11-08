@@ -42,6 +42,20 @@ pernah dikirim ke browser. Varian demo menambahkan dukungan item antrean
 `"local"` pada `scan_faces.py` sehingga pemindaian bisa membaca berkas gambar
 dari disk tanpa Google Drive.
 
+## Demo online (GitHub Pages)
+
+Versi statis demo ini juga di-host di GitHub Pages dengan **pencarian wajah
+yang berjalan sepenuhnya di browser** (tanpa server):
+
+> https://ther12k.github.io/shoker-14-event-gallery-demo/
+
+YuNet berjalan via opencv.js (WASM), embedding SFace via onnxruntime-web —
+pemrosesan awal dipindahkan 1:1 dari FaceRecognizerSFImpl OpenCV dan
+divalidasi terhadap hasil Python cv2 (kosinus embedding 0,9999). Indeks wajah
+(ilustrasi) dimuat dari public/demo/faces.json, dihasilkan oleh
+npm run faces:export. Semua berkas besar (opencv.js, wasm, model ONNX)
+dimuat malas saat panel wajah pertama kali dipakai.
+
 ## Menjalankan
 
 ```bash
